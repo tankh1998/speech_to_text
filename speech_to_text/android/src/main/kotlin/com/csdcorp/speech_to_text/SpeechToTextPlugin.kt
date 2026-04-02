@@ -36,8 +36,10 @@ import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.*
 import java.util.concurrent.Executors
+import android.media.MediaRecorder
 
 
 enum class SpeechToTextErrors {
@@ -135,6 +137,8 @@ public class SpeechToTextPlugin :
     private val defaultLanguageTag: String = Locale.getDefault().toLanguageTag()
     private var timer: Timer? = null
     private lateinit var timerTask: TimerTask
+    private var mediaRecorder: MediaRecorder? = null
+    private var audioFilePath: String? = null
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
 
@@ -295,6 +299,7 @@ public class SpeechToTextPlugin :
         debugLog("Start listening")
 
         optionallyStartBluetooth()
+        startRecording()
         setupRecognizerIntent(languageTag, partialResults, listenMode, onDevice, pauseFor )
         handler.post {
             run {
@@ -339,6 +344,7 @@ public class SpeechToTextPlugin :
         if ( !recognizerStops ) {
             destroyRecognizer()
         }
+        stopRecording()
         notifyListening(isRecording = false)
         result.success(true)
         debugLog("Stop listening done")
@@ -358,6 +364,9 @@ public class SpeechToTextPlugin :
         if ( !recognizerStops ) {
             destroyRecognizer()
         }
+        stopRecording()
+        audioFilePath?.let { File(it).delete() }
+        audioFilePath = null
         notifyListening(isRecording = false)
         result.success(true)
         debugLog("Cancel listening done")
@@ -417,6 +426,7 @@ public class SpeechToTextPlugin :
                 timer?.cancel()
                 timer = null
             }
+            stopRecording()
             val doneStatus = when( resultSent) {
                 false -> SpeechToTextStatus.doneNoResult.name
                 else -> SpeechToTextStatus.done.name
@@ -469,6 +479,10 @@ public class SpeechToTextPlugin :
                 alternates.put(speechWords)
             }
             speechResult.put("alternates", alternates)
+            if (isFinal) {
+                speechResult.put("audioPath", audioFilePath ?: JSONObject.NULL)
+                audioFilePath = null
+            }
             val jsonResult = speechResult.toString()
             debugLog("Calling results callback")
             resultSent = true
@@ -696,6 +710,47 @@ public class SpeechToTextPlugin :
                 }
             }
         }
+    }
+
+    private fun startRecording() {
+        stopRecording()
+        val context = pluginContext ?: return
+        try {
+            val file = File(context.cacheDir, "recording_${System.currentTimeMillis()}.amr")
+            audioFilePath = file.absolutePath
+            @Suppress("DEPRECATION")
+            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                MediaRecorder()
+            }
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.AMR_NB)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+            mediaRecorder = recorder
+            debugLog("Recording started: $audioFilePath")
+        } catch (e: Exception) {
+            Log.e(logTag, "Failed to start recording", e)
+            mediaRecorder = null
+            audioFilePath = null
+        }
+    }
+
+    private fun stopRecording() {
+        val recorder = mediaRecorder ?: return
+        mediaRecorder = null
+        try {
+            recorder.stop()
+        } catch (e: Exception) {
+            Log.w(logTag, "MediaRecorder stop failed (possibly no audio captured)", e)
+            audioFilePath = null
+        } finally {
+            recorder.release()
+        }
+        debugLog("Recording stopped")
     }
 
     private fun destroyRecognizer() {
